@@ -4,7 +4,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   readLastServerMoveFile,
   readServerConnectHoldFile,
+  readServerMovedFile,
+  writeLastServerMoveFile,
   writeServerConnectHoldFile,
+  writeServerMovedFile,
 } from "@bb/server-archive";
 import { describe, expect, it } from "vitest";
 import { createDeferredPromise } from "@bb/test-helpers";
@@ -20,6 +23,7 @@ import {
   prepareCommand,
   readJson,
   registerServerMoveFixtureCleanup,
+  writeFileWithDirs,
   writeLauncherMovedMode,
   writeSystemdUnit,
   type Fixture,
@@ -601,4 +605,153 @@ describe("server move redirects during a move", () => {
       false,
     );
   });
+});
+
+describe("server move back to a machine the server moved away from", () => {
+  const movedAwayAt = lastMove.completedAt - 3_600_000;
+
+  async function leaveMovedAwayCopy(fixture: Fixture): Promise<void> {
+    await writeFile(join(fixture.dataDir, "bb.db"), "old copy");
+    await writeServerMovedFile(fixture.dataDir, {
+      version: 1,
+      moveId: "move-away",
+      movedAt: movedAwayAt,
+      fromHostId: lastMove.toHostId,
+      toHostId: lastMove.fromHostId,
+      toHostName: lastMove.fromHostName,
+      serverUrl: "https://bb.example.test",
+      mode: "connect",
+      connectHandle: "example",
+      oldCopyEntries: ["bb.db"],
+    });
+    await writeLastServerMoveFile(fixture.dataDir, {
+      version: 1,
+      moveId: "move-away",
+      fromHostId: lastMove.toHostId,
+      fromHostName: lastMove.toHostName,
+      toHostId: lastMove.fromHostId,
+      toHostName: lastMove.fromHostName,
+      completedAt: movedAwayAt,
+      oldCopyDeletedAt: null,
+    });
+    await expect(fixture.service.deleteOldCopy()).resolves.toEqual({
+      deleted: true,
+    });
+    expect(await readServerMovedFile(fixture.dataDir)).toMatchObject({
+      moveId: "move-away",
+      oldCopyEntries: [],
+    });
+  }
+
+  async function writeLaunchAgent(fixture: Fixture): Promise<void> {
+    await writeFileWithDirs(
+      join(
+        fixture.homeDir,
+        "Library",
+        "LaunchAgents",
+        "app.getbb.host-daemon.old-server-studio.plist",
+      ),
+      `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>app.getbb.host-daemon.old-server-studio</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/opt/npm/bin/bb-app</string>
+    <string>host-daemon</string>
+    <string>--auto-update</string>
+    <string>--host-daemon-port</string>
+    <string>38887</string>
+    <string>--server-url</string>
+    <string>https://bb.example.test</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BB_APP_NPM_PREFIX</key><string>/opt/npm</string>
+    <key>BB_DATA_DIR</key><string>${fixture.dataDir}</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+`,
+    );
+  }
+
+  it.each([
+    {
+      name: "a LaunchAgent restarts it",
+      plan: "service",
+      platform: "darwin" as const,
+      env: {},
+      setup: writeLaunchAgent,
+    },
+    {
+      name: "a systemd user unit restarts it",
+      plan: "service",
+      platform: "linux" as const,
+      env: {},
+      setup: async (fixture: Fixture) => {
+        await writeSystemdUnit({
+          homeDir: fixture.homeDir,
+          dataDir: fixture.dataDir,
+          execStart: DAEMON_ONLY_EXEC_START,
+        });
+      },
+    },
+    {
+      name: "a replacement bb-app process starts it",
+      plan: "replacement",
+      platform: "linux" as const,
+      env: { BB_SERVER_MOVE_SERVICE_MANAGER: "none" },
+      setup: async () => undefined,
+    },
+  ])(
+    "starts as the server, not as the old copy, when $name",
+    async ({ plan, platform, env, setup }) => {
+      const fixture = await createFixture({ env });
+      await leaveMovedAwayCopy(fixture);
+      await setup(fixture);
+      const markerAtRestart: boolean[] = [];
+      const markerPath = join(fixture.dataDir, "server-moved.json");
+      const service = fixture.createService({
+        platform,
+        env,
+        runCommand: async (commandName, args) => {
+          fixture.commands.push([commandName, ...args]);
+          markerAtRestart.push(await exists(markerPath));
+        },
+        spawnDetached: async (request) => {
+          fixture.detachedRequests.push(request);
+          markerAtRestart.push(await exists(markerPath));
+          return 999_999;
+        },
+      });
+      await writeFile(
+        join(fixture.dataDir, "config.json"),
+        JSON.stringify({ serverUrl: "https://bb.example.test" }),
+      );
+      const command = await prepareCommand(fixture);
+      const prepared = await service.prepare(command);
+
+      await service.activate(activateCommand);
+      expect(
+        (await readIncomingMoveState(fixture.dataDir, MOVE_ID))?.activation
+          ?.plan,
+      ).toBe(plan);
+      await service.resumeActivation();
+
+      expect(await hasPendingServerExited(prepared.pid)).toBe(true);
+      expect(markerAtRestart.length).toBeGreaterThan(0);
+      expect(markerAtRestart.every((present) => !present)).toBe(true);
+      expect(await readServerMovedFile(fixture.dataDir)).toBeNull();
+      await expectMarkersRemoved(fixture);
+      expect(await readJson(join(fixture.dataDir, "config.json"))).toEqual({
+        config: { BB_LOG_LEVEL: "info" },
+        serverUrl: `http://127.0.0.1:${command.serverPort}`,
+      });
+    },
+  );
 });

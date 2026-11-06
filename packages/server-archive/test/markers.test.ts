@@ -3,6 +3,7 @@ import path from "node:path";
 import { makeTempDir } from "@bb/test-helpers";
 import { describe, expect, it } from "vitest";
 import {
+  discardSupersededServerMovedFile,
   LAST_SERVER_MOVE_FILE_NAME,
   readLastServerMoveFile,
   readServerConnectHoldFile,
@@ -159,5 +160,72 @@ describe("server move marker files", () => {
       }),
     ).rejects.toThrow(/activationToken/u);
     expect(await readdir(dataDir)).toEqual([]);
+  });
+});
+
+describe("discardSupersededServerMovedFile", () => {
+  const movedAway: ServerMovedFile = {
+    ...MOVED_FILE,
+    oldCopyEntries: [],
+  };
+  const movedBack = {
+    version: 1 as const,
+    moveId: "move-2",
+    fromHostId: "host-new",
+    fromHostName: "desktop",
+    toHostId: "host-old",
+    toHostName: "laptop",
+    completedAt: movedAway.movedAt + 60_000,
+    oldCopyDeletedAt: null,
+  };
+
+  it("removes a marker left by an earlier move once the server moved back here", async () => {
+    const dataDir = await makeTempDir();
+    await writeServerMovedFile(dataDir, movedAway);
+    await writeLastServerMoveFile(dataDir, movedBack);
+
+    expect(await discardSupersededServerMovedFile(dataDir)).toEqual(movedAway);
+    expect(await readServerMovedFile(dataDir)).toBeNull();
+    expect(await readLastServerMoveFile(dataDir)).toEqual(movedBack);
+  });
+
+  it.each([
+    {
+      name: "the last move is the one that wrote the marker",
+      lastMove: {
+        ...movedBack,
+        moveId: movedAway.moveId,
+        fromHostId: movedAway.fromHostId,
+        toHostId: movedAway.toHostId,
+        completedAt: movedAway.movedAt,
+      },
+    },
+    {
+      name: "the last move went to another machine",
+      lastMove: { ...movedBack, toHostId: "host-third" },
+    },
+    {
+      name: "the last move finished before the marker was written",
+      lastMove: { ...movedBack, completedAt: movedAway.movedAt - 1 },
+    },
+    { name: "there is no last move", lastMove: null },
+  ])("keeps the marker when $name", async ({ lastMove }) => {
+    const dataDir = await makeTempDir();
+    await writeServerMovedFile(dataDir, movedAway);
+    if (lastMove !== null) {
+      await writeLastServerMoveFile(dataDir, lastMove);
+    }
+
+    expect(await discardSupersededServerMovedFile(dataDir)).toBeNull();
+    expect(await readServerMovedFile(dataDir)).toEqual(movedAway);
+  });
+
+  it("keeps the marker when last-server-move.json is unreadable", async () => {
+    const dataDir = await makeTempDir();
+    await writeServerMovedFile(dataDir, movedAway);
+    await writeFile(path.join(dataDir, LAST_SERVER_MOVE_FILE_NAME), "{");
+
+    expect(await discardSupersededServerMovedFile(dataDir)).toBeNull();
+    expect(await readServerMovedFile(dataDir)).toEqual(movedAway);
   });
 });

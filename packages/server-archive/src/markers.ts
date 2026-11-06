@@ -201,6 +201,32 @@ export async function writeLastServerMoveFile(
   );
 }
 
+export function isServerMovedFileSuperseded(
+  marker: ServerMovedFile,
+  lastMove: LastServerMoveFile | null,
+): boolean {
+  return (
+    lastMove !== null &&
+    lastMove.moveId !== marker.moveId &&
+    lastMove.toHostId === marker.fromHostId &&
+    lastMove.completedAt > marker.movedAt
+  );
+}
+
+export async function discardSupersededServerMovedFile(
+  dataDir: string,
+): Promise<ServerMovedFile | null> {
+  const [marker, lastMove] = await Promise.all([
+    readServerMovedFile(dataDir).catch(() => null),
+    readLastServerMoveFile(dataDir).catch(() => null),
+  ]);
+  if (marker === null || !isServerMovedFileSuperseded(marker, lastMove)) {
+    return null;
+  }
+  await rm(join(dataDir, SERVER_MOVED_FILE_NAME), { force: true });
+  return marker;
+}
+
 export function readServerConnectHoldFile(
   dataDir: string,
 ): Promise<ServerConnectHoldFile | null> {

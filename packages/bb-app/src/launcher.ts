@@ -85,8 +85,10 @@ import {
   stripThreadContextEnv,
 } from "@bb/config/runtime";
 import {
+  discardSupersededServerMovedFile,
   readServerImportFile,
   readServerMovedFile,
+  SERVER_MOVED_FILE_NAME,
   type ServerMovedFile,
 } from "@bb/server-archive";
 import {
@@ -2847,6 +2849,7 @@ Exits with code 3 without starting when the server on this data directory moved 
     options: parsedArgs.options,
     serverUrlMode: "local",
   });
+  await discardSupersededServerMoveMarker(runtime.context.dataDir);
   const movedFile = await readBbServerMoveRefusal({
     dataDir: runtime.context.dataDir,
   });
@@ -3431,6 +3434,19 @@ export async function readServerMoveMarkers(
     readServerImportFile(args.dataDir),
   ]);
   return { movedFile, pendingMoveImport: importFile?.kind === "move" };
+}
+
+export async function discardSupersededServerMoveMarker(
+  dataDir: string,
+): Promise<void> {
+  const discarded = await discardSupersededServerMovedFile(dataDir);
+  if (discarded === null) {
+    return;
+  }
+  log(
+    yellow("!"),
+    `Removed a stale ${SERVER_MOVED_FILE_NAME}: this server moved to ${discarded.toHostName} earlier and has since moved back to this computer`,
+  );
 }
 
 async function readBbServerMoveRefusal(
@@ -4208,6 +4224,7 @@ export async function runBbApp(
       return;
     }
   }
+  await discardSupersededServerMoveMarker(context.dataDir);
   const cliLauncherPath =
     options.worktreePolicy === null && !runsFromSourceCheckout(import.meta.url)
       ? await writeOwnCliLauncher(context)

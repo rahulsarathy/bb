@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  readServerMovedFile,
   type ServerImportFile,
   type ServerMovedFile,
+  writeLastServerMoveFile,
   writeServerImportFile,
   writeServerMovedFile,
 } from "@bb/server-archive";
@@ -994,6 +996,49 @@ describe("bb-server after the server moved", () => {
       }
     },
   );
+
+  it("removes a marker from an earlier move once the server moved back, and starts", async () => {
+    const dataDir = scratchDir();
+    const movedAway = createMovedFile({ oldCopyEntries: [] });
+    await writeServerMovedFile(dataDir, movedAway);
+    await writeLastServerMoveFile(dataDir, {
+      version: 1,
+      moveId: "move-2",
+      fromHostId: movedAway.toHostId,
+      fromHostName: movedAway.toHostName,
+      toHostId: movedAway.fromHostId,
+      toHostName: "laptop",
+      completedAt: movedAway.movedAt + 60_000,
+      oldCopyDeletedAt: null,
+    });
+    const args = await bbServerArgs(dataDir);
+    const previousExitCode = process.exitCode;
+
+    try {
+      let failure: unknown = null;
+      const stdout = await captureOutput(process.stdout, async () => {
+        failure = await runBbServer(args).then(
+          () => null,
+          (error: unknown) => error,
+        );
+      });
+
+      expect(failure).toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining(
+            'BB_SERVER_BIND_HOST must be "127.0.0.1" or "0.0.0.0"',
+          ),
+        }),
+      );
+      expect(process.exitCode).toBe(previousExitCode);
+      expect(stdout).toContain(
+        "Removed a stale server-moved.json: this server moved to desk earlier and has since moved back to this computer",
+      );
+      expect(await readServerMovedFile(dataDir)).toBeNull();
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
 
   it("lets the pending server of a move back to this computer start", async () => {
     const dataDir = scratchDir();

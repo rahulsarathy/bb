@@ -22,6 +22,8 @@ export {
   serverArchiveManifestSchema,
 } from "./manifest.js";
 export {
+  discardSupersededServerMovedFile,
+  isServerMovedFileSuperseded,
   LAST_SERVER_MOVE_FILE_NAME,
   readLastServerMoveFile,
   readServerConnectHoldFile,
