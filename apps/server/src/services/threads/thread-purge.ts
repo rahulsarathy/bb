@@ -3,6 +3,7 @@ import {
   deleteThreadPurgeBatch,
   listRunningThreads,
   nextThreadPurge,
+  recordThreadPurgeFailure,
 } from "@bb/db";
 import type { AppDeps } from "../../types.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
@@ -15,28 +16,50 @@ const PURGE_EVENT_ROWS = 64;
 const PURGE_EVENT_BYTES = 512 * 1024;
 const PURGE_ROWS = 128;
 const STEP_COST_SMOOTHING = 0.2;
+const RETRY_BASE_MS = 60_000;
+const RETRY_MAX_MS = 60 * 60_000;
+const REPEATED_FAILURE_ATTEMPTS = 5;
 
 type ThreadPurgeDeps = Pick<AppDeps, "db" | "hub" | "logger">;
 
-export function advanceThreadPurge(deps: Pick<AppDeps, "db" | "hub">): boolean {
+function retryDelayMs(attempts: number): number {
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 16));
+}
+
+export function advanceThreadPurge(deps: ThreadPurgeDeps, now: number): boolean {
+  const threadId = nextThreadPurge(deps.db, { now });
+  if (threadId === null) return false;
   const notifications = new NotificationBuffer();
-  const worked = deps.db.transaction(
-    (tx) => {
-      const threadId = nextThreadPurge(tx);
-      if (threadId === null) return false;
-      const deleted = deleteThreadPurgeBatch(tx, {
-        maxEventBytes: PURGE_EVENT_BYTES,
-        maxEventRows: PURGE_EVENT_ROWS,
-        maxRows: PURGE_ROWS,
-        threadId,
-      });
-      if (deleted === 0) deleteThread(tx, notifications, threadId);
-      return true;
-    },
-    { behavior: "immediate" },
-  );
+  try {
+    deps.db.transaction(
+      (tx) => {
+        const deleted = deleteThreadPurgeBatch(tx, {
+          maxEventBytes: PURGE_EVENT_BYTES,
+          maxEventRows: PURGE_EVENT_ROWS,
+          maxRows: PURGE_ROWS,
+          threadId,
+        });
+        if (deleted === 0) deleteThread(tx, notifications, threadId);
+      },
+      { behavior: "immediate" },
+    );
+  } catch (error) {
+    const attempts = recordThreadPurgeFailure(deps.db, {
+      error: error instanceof Error ? error.message : String(error),
+      now,
+      retryDelayMs,
+      threadId,
+    });
+    const log = { attempts, err: error, retryInMs: retryDelayMs(attempts), threadId };
+    if (attempts >= REPEATED_FAILURE_ATTEMPTS) {
+      deps.logger.error(log, "Thread purge keeps failing; other threads continue");
+    } else {
+      deps.logger.warn(log, "Thread purge step failed; retrying later");
+    }
+    return true;
+  }
   notifications.flushInto(deps.hub);
-  return worked;
+  return true;
 }
 
 const wakers = new Set<() => void>();
@@ -74,7 +97,7 @@ export function startThreadPurging(
     try {
       do {
         const stepStartedAt = performance.now();
-        idle = !advanceThreadPurge(deps);
+        idle = !advanceThreadPurge(deps, Date.now());
         stepCostMs += STEP_COST_SMOOTHING * (performance.now() - stepStartedAt - stepCostMs);
       } while (
         !idle &&

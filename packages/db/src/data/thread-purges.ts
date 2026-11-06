@@ -1,4 +1,4 @@
-import { inArray, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import type { DbQueryConnection } from "../connection.js";
 import { events, threadPurges } from "../schema.js";
 
@@ -13,22 +13,52 @@ export function requestThreadPurge(
   args: { now: number; threadId: string },
 ): void {
   db.insert(threadPurges)
-    .values({ requestedAt: args.now, threadId: args.threadId })
+    .values({ requestedAt: args.now, retryAt: args.now, threadId: args.threadId })
     .onConflictDoNothing()
     .run();
 }
 
-export function nextThreadPurge(db: DbQueryConnection): string | null {
+export function nextThreadPurge(
+  db: DbQueryConnection,
+  args: { now: number },
+): string | null {
   return (
     db.get<{ threadId: string }>(sql`
       SELECT p.thread_id AS threadId FROM thread_purges p
-      WHERE NOT EXISTS (
-        SELECT 1 FROM threads c WHERE c.lifecycle_owner_thread_id = p.thread_id
-      )
+      WHERE p.retry_at <= ${args.now}
+        AND NOT EXISTS (
+          SELECT 1 FROM threads c WHERE c.lifecycle_owner_thread_id = p.thread_id
+        )
       ORDER BY p.requested_at, p.thread_id
       LIMIT 1
     `)?.threadId ?? null
   );
+}
+
+export function recordThreadPurgeFailure(
+  db: DbQueryConnection,
+  args: {
+    error: string;
+    retryDelayMs: (attempts: number) => number;
+    now: number;
+    threadId: string;
+  },
+): number {
+  const attempts =
+    (db
+      .select({ attempts: threadPurges.attempts })
+      .from(threadPurges)
+      .where(eq(threadPurges.threadId, args.threadId))
+      .get()?.attempts ?? 0) + 1;
+  db.update(threadPurges)
+    .set({
+      attempts,
+      lastError: args.error,
+      retryAt: args.now + args.retryDelayMs(attempts),
+    })
+    .where(eq(threadPurges.threadId, args.threadId))
+    .run();
+  return attempts;
 }
 
 export function deleteThreadPurgeBatch(

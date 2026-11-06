@@ -153,6 +153,7 @@ export { getStoredThreadTabs, replaceStoredThreadTabs } from "./thread-tabs.js";
 export {
   deleteThreadPurgeBatch,
   nextThreadPurge,
+  recordThreadPurgeFailure,
   requestThreadPurge,
 } from "./thread-purges.js";
 export {

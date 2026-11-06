@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "fb0da560-6a29-48be-9b13-d066895b0b23",
+  "id": "ec9ad294-ab87-43b7-b309-a83254abf5b1",
   "prevId": "78bdb439-f973-400a-8a92-3d57a5d420b5",
   "tables": {
     "app_settings": {
@@ -4604,12 +4604,35 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "retry_at": {
+          "name": "retry_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {
-        "thread_purges_requested_idx": {
-          "name": "thread_purges_requested_idx",
+        "thread_purges_retry_idx": {
+          "name": "thread_purges_retry_idx",
           "columns": [
+            "retry_at",
             "requested_at"
           ],
           "isUnique": false

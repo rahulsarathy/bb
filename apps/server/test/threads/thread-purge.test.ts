@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { sql } from "drizzle-orm";
-import { getThread } from "@bb/db";
+import { eq, sql } from "drizzle-orm";
+import { getThread, threadPurges } from "@bb/db";
 import { threadScope } from "@bb/domain";
 import {
   advanceThreadPurge,
@@ -57,13 +57,13 @@ describe("paced thread deletion", () => {
       expect(getThread(harness.db, thread.id)?.deletedAt).toEqual(expect.any(Number));
       expect(countEvents(harness, thread.id)).toBe(200);
 
-      expect(advanceThreadPurge(harness.deps)).toBe(true);
+      expect(advanceThreadPurge(harness.deps, Date.now())).toBe(true);
       expect(countEvents(harness, thread.id)).toBe(136);
       expect(
         (await harness.app.request(`${API}/threads/${thread.id}`)).status,
       ).toBe(404);
 
-      while (advanceThreadPurge(harness.deps)) {}
+      while (advanceThreadPurge(harness.deps, Date.now())) {}
       expect(getThread(harness.db, thread.id)).toBeNull();
       expect(countEvents(harness, thread.id)).toBe(0);
     });
@@ -85,6 +85,41 @@ describe("paced thread deletion", () => {
       } finally {
         purging.stop();
       }
+    });
+  });
+
+  it("moves past a thread whose purge keeps failing and retries it after a delay", async () => {
+    await withTestHarness(async (harness) => {
+      const failing = seedThreadWithEvents(harness, 3);
+      const next = seedThreadWithEvents(harness, 3);
+      harness.db.run(
+        sql.raw(
+          `CREATE TEMP TRIGGER fail_purge BEFORE DELETE ON events WHEN old.thread_id = '${failing.id}' BEGIN SELECT RAISE(ABORT, 'simulated purge failure'); END`,
+        ),
+      );
+      expect((await deleteThreadRequest(harness, failing.id)).status).toBe(200);
+      expect((await deleteThreadRequest(harness, next.id)).status).toBe(200);
+      const now = Date.now();
+
+      while (advanceThreadPurge(harness.deps, now)) {}
+      expect(getThread(harness.db, next.id)).toBeNull();
+      expect(countEvents(harness, failing.id)).toBe(3);
+      expect(
+        harness.db
+          .select()
+          .from(threadPurges)
+          .where(eq(threadPurges.threadId, failing.id))
+          .get(),
+      ).toMatchObject({
+        attempts: 1,
+        lastError: expect.stringContaining("simulated purge failure"),
+        retryAt: now + 60_000,
+      });
+      expect(advanceThreadPurge(harness.deps, now + 59_999)).toBe(false);
+
+      harness.db.run(sql`DROP TRIGGER fail_purge`);
+      while (advanceThreadPurge(harness.deps, now + 60_000)) {}
+      expect(getThread(harness.db, failing.id)).toBeNull();
     });
   });
 });
